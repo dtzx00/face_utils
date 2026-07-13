@@ -1,11 +1,12 @@
-import io,os
+import io, os
 from setuptools import setup
+
 
 def readme():
     base_dir = os.path.abspath(os.path.dirname(__file__))
-    with io.open(
-            os.path.join(base_dir, 'README.md'), 'r', encoding='utf-8') as f:
+    with io.open(os.path.join(base_dir, 'README.md'), 'r', encoding='utf-8') as f:
         return f.read()
+
 
 install_requirements = [
     "requests",
@@ -18,24 +19,24 @@ install_requirements = [
     "python-dotenv",
     "statsmodels",
 ]
-    
+
 setup(
-    name='physiognomy',
-    version='0.2.2',    
-    description='All hail god of physiognomy! Long live the pseudoscience!',
+    name='face_utils',
+    version='0.3.0',
+    description='Facial-feature extraction, image preprocessing, and statistics utilities for facial-image research.',
     long_description=readme(),
     long_description_content_type="text/markdown",
-    url='https://github.com/davidwdw/physiognomy',
+    url='https://github.com/dtzx00/Facial_Features',
     author='Dawei Wang',
     author_email='david.wang@kellogg.northwestern.edu',
     license='BSD 2-clause',
-    packages=['physiognomy'],
+    packages=['face_utils'],
     classifiers=[
-        'Development Status :: 1 - Planning',
+        'Development Status :: 3 - Alpha',
         'Intended Audience :: Science/Research',
-        'License :: OSI Approved :: BSD License',  
-        'Operating System :: POSIX :: Linux',  
-        'Programming Language :: Python :: 3.6',
+        'License :: OSI Approved :: BSD License',
+        'Operating System :: POSIX :: Linux',
+        'Programming Language :: Python :: 3',
     ],
     install_requires=install_requirements,
 )

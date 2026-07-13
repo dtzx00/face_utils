@@ -1,9 +1,0 @@
-requests
-scipy
-numpy
-pandas
-opencv-python-headless
-scikit-learn
-matplotlib
-python-dotenv
-statsmodels

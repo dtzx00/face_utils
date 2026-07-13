@@ -1,1 +1,20 @@
-/physiognomy/.env
+# Byte-compiled / build artifacts
+__pycache__/
+*.py[cod]
+build/
+dist/
+*.egg-info/
+.eggs/
+
+# Environments & secrets
+.env
+.venv/
+venv/
+
+# Models (large binaries)
+*.h5
+models/
+
+# OS / editor
+.DS_Store
+.ipynb_checkpoints/

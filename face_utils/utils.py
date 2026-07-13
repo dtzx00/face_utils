@@ -22,6 +22,18 @@ from sklearn.model_selection import train_test_split
 
 
 
+def isnotebook():
+    try:
+        shell = get_ipython().__class__.__name__
+        if shell == 'ZMQInteractiveShell':
+            return True
+        elif shell == 'TerminalInteractiveShell':
+            return False
+        else:
+            return False
+    except NameError:
+        return False
+
 def Get_Flattened_Dict(d, parent_key='', sep='_'):
     '''Utility function that flattens nested dictionary
     from Face++ and returns a flattened dictionary
@@ -215,7 +227,7 @@ def get_faceplusplus_outputs(img,key,verify_score=5):
     
     score,landmarks,attributes,rectangle = \
     Get_FacePlusPlus_Outputs(img,FREE_KEY,FREE_SECRET,2,1)
-    if landmarks is not 0: 
+    if landmarks != 0: 
         key = 'free | face detected'
         if score >= verify_score:
             return score,landmarks,attributes,get_rectangle(rectangle),key
@@ -252,14 +264,14 @@ def get_rotated_image(img,src_lt,src_rt,dst_lt=(33,33),
     yin = s60*(
         inPts[0][0]-inPts[1][0])+c60*(
         inPts[0][1]-inPts[1][1])+inPts[1][1]
-    inPts.append((np.int(xin),np.int(yin)))
+    inPts.append((int(xin),int(yin)))
     xout = c60*(
         outPts[0][0]-outPts[1][0])-s60*(
         outPts[0][1]-outPts[1][1])+outPts[1][0]
     yout = s60*(
         outPts[0][0]-outPts[1][0])+c60*(
         outPts[0][1]-outPts[1][1])+outPts[1][1]
-    outPts.append((np.int(xout),np.int(yout)))
+    outPts.append((int(xout),int(yout)))
     tform = cv2.estimateAffine2D(
         np.array([inPts]),np.array([outPts]))[0]
     tform = np.float32(tform.flatten()[:6].reshape(2,3))
@@ -421,7 +433,7 @@ def load_data(sex,N=None):
                 facial_images[f'{cat}/{idx}/{img}'] = loaded['img']
                 attribute_data = loaded['attributes']
 
-                if attribute_data is not 0:
+                if attribute_data != 0:
 
                     attribute_data.update({'Age':gts.loc[idx]['age']})
                     attribute_data.update({'Sexuality':gts.loc[idx]['sexuality']})
