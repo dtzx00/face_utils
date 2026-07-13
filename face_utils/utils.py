@@ -21,6 +21,7 @@ from sklearn.model_selection import train_test_split
 
 
 def isnotebook():
+    """Return True if running inside a Jupyter/IPython notebook."""
     try:
         shell = get_ipython().__class__.__name__
         if shell == 'ZMQInteractiveShell':
@@ -46,6 +47,7 @@ def Get_Flattened_Dict(d, parent_key='', sep='_'):
     return dict(items)
 
 def Get_Euclidean_Distance(source_representation, test_representation):
+    """Return the Euclidean (L2) distance between two feature vectors."""
     euclidean_distance = source_representation - test_representation
     euclidean_distance = np.sum(np.multiply(euclidean_distance, euclidean_distance))
     return np.sqrt(euclidean_distance)
@@ -75,7 +77,7 @@ def load_api_keys(location='.env'):
     try:
         FREE_SECRET = config['FREE_SECRET']
         PAID_SECRET = config['PAID_SECRET']
-    except:
+    except Exception:
         FREE_SECRET = None
         PAID_SECRET = None
         
@@ -187,11 +189,12 @@ def Get_FacePlusPlus_Outputs(img,KEY,SECRET,landmark_106=2,compare_face=1):
     # If for some reason unsuccessful
     # E.g. timeout after 2 seconds
     # Or no 'faces' key found in response
-    except:
+    except Exception:
         # Return nothing
         return 0,0,0,0
     
 def get_rectangle(rectangle):
+    """Convert a Face++ rectangle dict to (top, left, width, height) coordinates."""
     return [((rectangle['left'],
               rectangle['top']),
              (rectangle['left']+rectangle['width'],
@@ -304,6 +307,7 @@ from sklearn.ensemble import RandomForestClassifier
 from sklearn.preprocessing import OneHotEncoder
 
 def Classify_LR(df,yvar='type',method='Logistic Regression'):
+    """Fit a logistic-regression classifier and return per-group prediction scores."""
     CATS=dict(df[yvar].value_counts()).keys()
     CATS=['Grp_{}'.format(int(i)) for i in CATS];CATS=sorted(CATS)
     
@@ -320,6 +324,7 @@ def Classify_LR(df,yvar='type',method='Logistic Regression'):
     return y_scores,y_t,accuracy
 
 def logistic_regression(df,printing=False):
+    """Fit a multinomial logit (statsmodels MNLogit) on a dataframe with a 'type' label; return the fitted result."""
     y=df['type'].values
     ohe=OneHotEncoder(categories='auto',sparse_output=False)
     y_bin=ohe.fit_transform(y.reshape(len(y),-1))
@@ -330,6 +335,7 @@ def logistic_regression(df,printing=False):
     return res
 
 def match_df(df,scores,method='Propensity',yvar='type',threshold=0.0001):
+    """Match treatment/control rows by propensity or Euclidean distance within a threshold; return matched indices."""
     if method=='Euclidean':
         Prop_Names=['Prop_Score_{}'.format(j) 
                     for j in list(set(df[yvar].values.astype(int)))]
@@ -389,6 +395,7 @@ def match_df(df,scores,method='Propensity',yvar='type',threshold=0.0001):
 
 # load the attributes
 def load_data(sex,N=None):
+    """Load and stack per-category image/attribute data from a directory into a dataframe."""
     
     # load groundtruths
     def load_gts(sex):
@@ -441,6 +448,7 @@ def load_data(sex,N=None):
     return attributes,facial_images
 
 def clean_attributes(final_data):
+    """Clean and flatten raw Face++ attribute output into tidy numeric columns."""
     
     def clean(df):
         df=df.dropna(axis=0,how='any');
@@ -498,6 +506,7 @@ def clean_attributes(final_data):
     return pd.concat(dfs)
 
 def split_attributes(sex,df,test_size=.15,final_dfs={},predictor=''):
+    """Split attribute data into train/test sets per category for a given predictor."""
     
     train_loc,test_loc = train_test_split(df[df['Image']==0].index.tolist(),
                                           test_size=test_size)
@@ -518,6 +527,7 @@ def split_attributes(sex,df,test_size=.15,final_dfs={},predictor=''):
     return final_dfs['train']
 
 def match_age(attributes):
+    """Match samples across groups on age to balance the age distribution."""
     
     def match(df,yvar='type'):
         group_all = dict(df[yvar].value_counts())
@@ -563,6 +573,7 @@ def match_age(attributes):
     return attributes.loc[set(attributes.index).intersection(set(idx_u))]
 
 def match_attributes(df,threshold=0.0001):
+    """Match samples across groups on facial attributes within a distance threshold."""
     
     y_scores,_,_ = Classify_LR(df)
     df_b = df.loc[match_df(df,y_scores,threshold=threshold)]
@@ -584,6 +595,7 @@ def match_attributes(df,threshold=0.0001):
 
 
 def get_dist_angle(X):
+    """Return pairwise distances and angles between landmark points."""
     
     distance = []
     angle = []
@@ -742,6 +754,7 @@ def load_custom_vgg(model_fp='./models/vggface.h5'):
     return Model(inputs=vggface.input, outputs=vggface.get_layer('fc7/relu').output)
 
 def load_custom_lr():
+    """Load a pre-fit logistic-regression pipeline for scoring."""
     # return the custom SVD and LR model
     return Pipeline(steps=[('svd', TruncatedSVD(n_components=500)),
                            ('lr', LogisticRegression(penalty='l1',

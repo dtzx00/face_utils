@@ -4,6 +4,7 @@ from scipy import stats
 import scipy.stats
 
 def round_str(coef,round_nos=2,no_zero=False):
+    """Format a number to a fixed number of decimals as a zero-padded string."""
     coef = str(round(coef,round_nos))
     split = coef.split('.')
     if len(split)>1:
@@ -19,10 +20,12 @@ def round_str(coef,round_nos=2,no_zero=False):
         return coef
     
 def convert_ci_str(ci,round_to=3):
+    """Format a (low, high) confidence interval as a '[low, high]' string."""
     return '[{}, {}]'.format(round_str(ci[0],round_to),
                              round_str(ci[1],round_to))
 
 def stars(coef,pval,round_nos=3):
+    """Return a coefficient string annotated with significance stars (*, **, ***)."""
     stars = \
     '***' if pval<0.001 else \
     '**' if pval<0.01 else \
@@ -30,9 +33,11 @@ def stars(coef,pval,round_nos=3):
     return round_str(coef,round_nos)+stars
 
 def pval(pval,round_nos=3):
+    """Format a p-value, collapsing very small values to '<.001'."""
     return '<.001' if pval<=.001 else round_str(pval,round_nos,True)
 
 def odds_prob(coef,const):
+    """Convert a logit intercept + coefficient into a probability."""
     return 1/(1+np.exp(-(const+coef)))
 
 # function to calculate Cohen's d for independent samples
@@ -86,6 +91,7 @@ def cohen_effect_size(mean1, mean2, var1, var2, cat=None,
     return (mean1 - mean2) / pooled
     
 def get_confidence_interval_data(data,confidence=0.95,err=True):
+    """Return the mean and confidence-interval bounds for a data sample."""
     a = 1.0 * np.array(data)
     n = len(a)
     m, se = np.mean(a), scipy.stats.sem(a)
@@ -143,6 +149,7 @@ def compute_midrank_weight(x, sample_weight):
     return T2
 
 def fastDeLong(predictions_sorted_transposed, label_1_count, sample_weight):
+    """Fast DeLong computation of AUC covariance for correlated ROC curves."""
     if sample_weight is None:
         return fastDeLong_no_weights(predictions_sorted_transposed, label_1_count)
     else:
@@ -257,6 +264,7 @@ def calc_pvalue(aucs, sigma):
 
 
 def compute_ground_truth_statistics(ground_truth, sample_weight):
+    """Order labels and return positive/negative counts for the DeLong test."""
     assert np.array_equal(np.unique(ground_truth), [0, 1])
     order = (-ground_truth).argsort()
     label_1_count = int(ground_truth.sum())
@@ -298,6 +306,7 @@ def delong_roc_test(ground_truth, predictions_one, predictions_two):
     return calc_pvalue(aucs,delongcov)
 
 def get_confidence_interval(true,pred):
+    """Return the confidence interval for an AUC via the DeLong variance."""
     auc,auc_cov = delong_roc_variance(true,pred)
     auc_std = np.sqrt(auc_cov)
     lower_upper_q = np.abs(np.array([0, 1]) - (1 - .95) / 2)
