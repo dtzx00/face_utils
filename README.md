@@ -79,10 +79,12 @@ the automated smoke test.
 
 ## Notes
 
-- `stats.cohen_effect_size(mean1, mean2, var1, var2, cat)` takes **variances** (not
-  arrays) for the 3rd/4th args and uses study-specific pooled sample sizes selected by
-  `cat` (`'men'` vs other). Generalize the hardcoded Ns if you reuse it outside the
-  original study.
+- `stats.cohen_effect_size(mean1, mean2, var1, var2, cat=None, n1=None, n2=None, correct=False)`
+  takes **variances** (not arrays) for `var1`/`var2`. Pass explicit `n1`/`n2` for your
+  own group sizes; the legacy `cat` selector (`'men'`->5081, else 10800) is kept only
+  for reproducing the original study. By default it reproduces the original
+  (SD-pooled) computation; pass `correct=True` for the standard pooled-variance
+  Cohen's d.
 - Face++ credentials belong in a local `.env` (`FPP_KEY`, `FPP_SECRET`); it is
   gitignored. Never commit keys.
 

@@ -36,19 +36,54 @@ def odds_prob(coef,const):
     return 1/(1+np.exp(-(const+coef)))
 
 # function to calculate Cohen's d for independent samples
-def cohen_effect_size(a1, a2, c1, c2, cat):
-    
-    if cat=='men':
-        n = 5081*2
+# Sample sizes used by the original study, kept so the historical `cat`
+# argument still reproduces the published numbers.
+_LEGACY_GROUP_SIZES = {"men": 5081, "women": 10800}
+
+
+def cohen_effect_size(mean1, mean2, var1, var2, cat=None,
+                      n1=None, n2=None, correct=False):
+    """Cohen's d for two independent groups.
+
+    Parameters
+    ----------
+    mean1, mean2 : float
+        Group means.
+    var1, var2 : float
+        Group variances.
+    cat : str, optional
+        Legacy selector for the original study's hardcoded per-group sample
+        sizes (``'men'`` -> 5081, anything else -> 10800). Used only when
+        ``n1``/``n2`` are not given, for backward compatibility.
+    n1, n2 : int, optional
+        Explicit per-group sample sizes. If given, they override ``cat``.
+        When only ``n1`` is given, ``n2`` defaults to ``n1`` (equal groups).
+    correct : bool, default False
+        If ``True``, use the standard pooled-SD formula
+        ``sqrt(((n1-1)*var1 + (n2-1)*var2) / (n1+n2-2))``.
+        If ``False`` (default), reproduce the original implementation, which
+        pooled the standard deviations rather than the variances. Keep the
+        default to match previously published numbers; set ``True`` for a
+        statistically correct pooled SD.
+
+    Returns
+    -------
+    float
+        The effect size ``(mean1 - mean2) / pooled_sd``.
+    """
+    if n1 is None:
+        n1 = _LEGACY_GROUP_SIZES.get(cat, _LEGACY_GROUP_SIZES["women"])
+    if n2 is None:
+        n2 = n1
+
+    if correct:
+        pooled = np.sqrt(((n1 - 1) * var1 + (n2 - 1) * var2) / (n1 + n2 - 2))
     else:
-        n = 10800*2
-    
-    # calculate the variance of the samples
-    s1, s2 = np.sqrt(c1), np.sqrt(c2)
-    # calculate the pooled standard deviation
-    s = np.sqrt(((n - 1) * s1 + (n - 1) * s2) / (n + n - 2))
-    # calculate the effect size
-    return (a1 - a2) / s
+        # Original behavior: pools the standard deviations (sqrt of variance).
+        s1, s2 = np.sqrt(var1), np.sqrt(var2)
+        pooled = np.sqrt(((n1 - 1) * s1 + (n2 - 1) * s2) / (n1 + n2 - 2))
+
+    return (mean1 - mean2) / pooled
     
 def get_confidence_interval_data(data,confidence=0.95,err=True):
     a = 1.0 * np.array(data)

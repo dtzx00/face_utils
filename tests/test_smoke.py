@@ -25,8 +25,13 @@ def test_stats_formatting():
 
 
 def test_cohen_effect_size():
-    d = stats.cohen_effect_size(0.6, 0.4, 0.04, 0.04, "men")
-    assert np.isfinite(d)
+    # legacy cat-based path
+    assert np.isfinite(stats.cohen_effect_size(0.6, 0.4, 0.04, 0.04, "men"))
+    # explicit sample sizes override cat
+    assert np.isfinite(stats.cohen_effect_size(0.6, 0.4, 0.04, 0.05, n1=100, n2=120))
+    # corrected pooled-variance formula: equal var=1, equal n -> d = mean diff
+    d = stats.cohen_effect_size(1.0, 0.0, 1.0, 1.0, n1=50, n2=50, correct=True)
+    assert abs(d - 1.0) < 1e-9
 
 
 def test_delong_auc():
