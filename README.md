@@ -7,10 +7,15 @@ The package wraps common steps in a facial-image analysis pipeline: pulling land
 ## Installation
 
 ```bash
-pip install -e .
+pip install -e .          # core: extraction, preprocessing, stats
+pip install -e ".[deep]"  # + TensorFlow, only for the VGGFace feature extractor
 ```
 
-Requires Python 3.6+. Dependencies are installed automatically (`requests`, `numpy`, `scipy`, `pandas`, `opencv-python-headless`, `scikit-learn`, `matplotlib`, `statsmodels`, `python-dotenv`).
+Requires Python 3.8+. Core dependencies install automatically (`requests`, `numpy`,
+`scipy`, `pandas`, `opencv-python-headless`, `scikit-learn`, `matplotlib`,
+`statsmodels`, `python-dotenv`). TensorFlow is **optional** and pulled in only by the
+`deep` extra; `face_utils.load_custom_vgg` raises a clear error if it is missing, so
+the rest of the package works without a heavy deep-learning install.
 
 Face++ calls require API credentials. Put them in a local `.env` file (never commit it):
 
@@ -58,6 +63,28 @@ This toolkit supports research on facial-image analysis. Related work:
 - Kosinski, M. (2017). Facial width-to-height ratio does not predict self-reported behavioral tendencies. *Psychological Science, 28*(11), 1675–1682. https://doi.org/10.1177/0956797617716929
 - Wang, Y., & Kosinski, M. (2018). Deep neural networks are more accurate than humans at detecting sexual orientation from facial images. *Journal of Personality and Social Psychology, 114*(2), 246–257. https://doi.org/10.1037/pspa0000098
 - Wang, D. (2022). Presentation in self-posted facial images can expose sexual orientation: Implications for research and privacy. *Journal of Personality and Social Psychology, 122*(5), 806–824. https://doi.org/10.1037/pspa0000294
+
+## Testing
+
+The statistics module and the network-free image/analysis utilities are covered by
+an end-to-end smoke test:
+
+```bash
+python -m pytest tests/            # or: python tests/test_smoke.py
+```
+
+The Face++ functions (`get_faceplusplus_outputs`, `Get_FacePlusPlus_Outputs`) require
+live API credentials and a face image, so they are exercised manually rather than in
+the automated smoke test.
+
+## Notes
+
+- `stats.cohen_effect_size(mean1, mean2, var1, var2, cat)` takes **variances** (not
+  arrays) for the 3rd/4th args and uses study-specific pooled sample sizes selected by
+  `cat` (`'men'` vs other). Generalize the hardcoded Ns if you reuse it outside the
+  original study.
+- Face++ credentials belong in a local `.env` (`FPP_KEY`, `FPP_SECRET`); it is
+  gitignored. Never commit keys.
 
 ## License
 

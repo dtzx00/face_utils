@@ -7,10 +7,8 @@ import pandas as pd; import numpy as np
 from matplotlib import pyplot as plt
 from dotenv import dotenv_values
 
-import tensorflow as tf
-import tensorflow.keras.backend as K
-from tensorflow.keras import layers
-from tensorflow.keras.models import Model
+# TensorFlow / Keras are imported lazily inside load_custom_vgg() so that the
+# rest of the package works without a heavy deep-learning install.
 
 from sklearn.pipeline import Pipeline
 from sklearn.decomposition import TruncatedSVD
@@ -323,7 +321,7 @@ def Classify_LR(df,yvar='type',method='Logistic Regression'):
 
 def logistic_regression(df,printing=False):
     y=df['type'].values
-    ohe=OneHotEncoder(categories='auto',sparse=False)
+    ohe=OneHotEncoder(categories='auto',sparse_output=False)
     y_bin=ohe.fit_transform(y.reshape(len(y),-1))
     X=df.drop(['type'],axis=1)
     mod=MNLogit(y_bin,X);res=mod.fit()
@@ -682,6 +680,17 @@ def augment_img(temp,cat,
 
 
 def load_custom_vgg(model_fp='./models/vggface.h5'):
+    """Build the VGGFace feature extractor. Requires TensorFlow/Keras
+    (install with: pip install face_utils[deep])."""
+    try:
+        import tensorflow.keras.backend as K
+        from tensorflow.keras import layers
+        from tensorflow.keras.models import Model
+    except ImportError as e:
+        raise ImportError(
+            "load_custom_vgg requires TensorFlow. Install it with "
+            "`pip install face_utils[deep]` or `pip install tensorflow`."
+        ) from e
     K.clear_session()
 
     # Input tensor

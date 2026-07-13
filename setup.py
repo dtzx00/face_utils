@@ -39,4 +39,8 @@ setup(
         'Programming Language :: Python :: 3',
     ],
     install_requires=install_requirements,
+    extras_require={
+        # Deep-learning extras: only needed for load_custom_vgg / VGGFace features.
+        "deep": ["tensorflow>=2.0"],
+    },
 )
