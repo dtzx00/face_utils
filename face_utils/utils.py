@@ -760,3 +760,89 @@ def load_custom_lr():
                            ('lr', LogisticRegression(penalty='l1',
                                                      solver='liblinear'))],verbose=100)
 
+
+
+# ---------------------------------------------------------------------------
+# Facial width-to-height ratio (fWHR)
+# ---------------------------------------------------------------------------
+# fWHR = bizygomatic width / upper-facial height, following Weston et al. (2007)
+# and as used in Wang et al. (2019, Psychological Science) and Kosinski (2017,
+# Psychological Science). Bizygomatic width is the maximum horizontal distance
+# between the left and right facial (cheek) boundaries; upper-facial height is
+# the vertical distance from the brow (upper eyelid / eyebrow line) to the upper
+# lip. Both papers report that fWHR predicts *perception* far more reliably than
+# it predicts behavior, so treat downstream fWHR-behavior claims with care.
+
+
+def fwhr_from_points(left_cheek, right_cheek, brow, upper_lip):
+    """Compute facial width-to-height ratio (fWHR) from four (x, y) points.
+
+    Parameters
+    ----------
+    left_cheek, right_cheek : tuple(float, float)
+        Left/right facial-boundary points at the widest (bizygomatic) level.
+    brow : tuple(float, float)
+        Upper-facial-height top reference (brow / upper-eyelid line).
+    upper_lip : tuple(float, float)
+        Upper-facial-height bottom reference (top of the upper lip).
+
+    Returns
+    -------
+    float
+        width / height. Raises ValueError if the height is zero.
+    """
+    width = abs(float(right_cheek[0]) - float(left_cheek[0]))
+    height = abs(float(upper_lip[1]) - float(brow[1]))
+    if height == 0:
+        raise ValueError("Upper-facial height is zero; check the brow/upper_lip points.")
+    return width / height
+
+
+# Default Face++ landmark keys for each fWHR reference point. Override these if
+# your landmark model uses different names.
+_FWHR_DEFAULT_KEYS = {
+    "left_cheek": "contour_left1",
+    "right_cheek": "contour_right1",
+    "brow": "left_eyebrow_upper_middle",
+    "upper_lip": "mouth_upper_lip_top",
+}
+
+
+def compute_fwhr(landmarks, keys=None):
+    """Compute fWHR from a Face++ landmarks dict ``{name: (x, y)}``.
+
+    Parameters
+    ----------
+    landmarks : dict
+        Mapping of landmark name -> (x, y), as returned by
+        ``Get_FacePlusPlus_Outputs`` / ``get_faceplusplus_outputs``.
+    keys : dict, optional
+        Overrides for which landmark names identify the four reference points
+        (``left_cheek``, ``right_cheek``, ``brow``, ``upper_lip``). Defaults to
+        the Face++ 106-point names in ``_FWHR_DEFAULT_KEYS``.
+
+    Returns
+    -------
+    float
+        The facial width-to-height ratio.
+
+    Raises
+    ------
+    KeyError
+        If a required landmark name is missing from ``landmarks``.
+    """
+    k = dict(_FWHR_DEFAULT_KEYS)
+    if keys:
+        k.update(keys)
+    missing = [name for name in k.values() if name not in landmarks]
+    if missing:
+        raise KeyError(
+            "Missing landmark(s) for fWHR: {}. Pass `keys=` to map to your "
+            "landmark model's names.".format(missing)
+        )
+    return fwhr_from_points(
+        landmarks[k["left_cheek"]],
+        landmarks[k["right_cheek"]],
+        landmarks[k["brow"]],
+        landmarks[k["upper_lip"]],
+    )

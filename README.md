@@ -32,11 +32,40 @@ FPP_SECRET=your_secret
 - **Modeling / matching:** `Classify_LR`, `logistic_regression`, `match_df`, `match_age`, `match_attributes`, `get_dist_angle`
 - **Data handling:** `load_data`, `clean_attributes`, `split_attributes`
 - **Augmentation / models:** `augment_img`, `load_custom_vgg`, `load_custom_lr`
+- **Facial width-to-height ratio (fWHR):** `compute_fwhr`, `fwhr_from_points`
 
 ### `face_utils.stats` — statistics helpers
 - **Formatting:** `round_str`, `convert_ci_str`, `stars`, `pval`
 - **Effect sizes / CIs:** `cohen_effect_size`, `get_confidence_interval_data`, `odds_prob`
 - **DeLong AUC comparison:** `delong_roc_test`, `delong_roc_variance`, `fastDeLong`, `calc_pvalue`, `get_confidence_interval`
+
+### Facial width-to-height ratio (fWHR)
+
+`fWHR = bizygomatic width / upper-facial height` (Weston et al., 2007), the measure
+used in Wang et al. (2019) and Kosinski (2017).
+
+```python
+from face_utils import utils
+
+# From a Face++ landmarks dict (uses default Face++ 106-point key names)
+_, landmarks, _, _, _ = utils.get_faceplusplus_outputs(img, (key, secret))
+ratio = utils.compute_fwhr(landmarks)
+
+# If your landmark model uses different names, remap the four reference points
+ratio = utils.compute_fwhr(landmarks, keys={
+    "left_cheek": "contour_left1",
+    "right_cheek": "contour_right1",
+    "brow": "left_eyebrow_upper_middle",
+    "upper_lip": "mouth_upper_lip_top",
+})
+
+# Or compute directly from four (x, y) points, bypassing any landmark model
+ratio = utils.fwhr_from_points(left_cheek, right_cheek, brow, upper_lip)
+```
+
+> Note: both fWHR papers in the bibliography find that fWHR predicts *perception*
+> far more reliably than it predicts *behavior*. Interpret fWHR-behavior links with
+> the caution those papers argue for.
 
 ## Quick start
 

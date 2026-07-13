@@ -72,6 +72,29 @@ def test_modeling():
     assert acc is not None
 
 
+def test_fwhr():
+    # square-ish reference: width 100, height 50 -> fWHR 2.0
+    d = utils.fwhr_from_points((10, 40), (110, 40), (60, 20), (60, 70))
+    assert abs(d - 2.0) < 1e-9
+    # dict path with default Face++ keys
+    lm = {
+        "contour_left1": (10, 40),
+        "contour_right1": (110, 40),
+        "left_eyebrow_upper_middle": (60, 20),
+        "mouth_upper_lip_top": (60, 70),
+    }
+    assert abs(utils.compute_fwhr(lm) - 2.0) < 1e-9
+    # custom key mapping
+    lm2 = {"L": (0, 5), "R": (80, 5), "B": (40, 0), "U": (40, 40)}
+    keys = {"left_cheek": "L", "right_cheek": "R", "brow": "B", "upper_lip": "U"}
+    assert abs(utils.compute_fwhr(lm2, keys=keys) - 2.0) < 1e-9
+    # missing landmark -> clear KeyError
+    try:
+        utils.compute_fwhr({"contour_left1": (0, 0)})
+        raise AssertionError("expected KeyError")
+    except KeyError:
+        pass
+
 if __name__ == "__main__":
     fns = [v for k, v in sorted(globals().items()) if k.startswith("test_")]
     passed = 0
