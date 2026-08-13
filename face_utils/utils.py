@@ -1,848 +1,682 @@
-#!/usr/bin/env python
-# coding: utf-8
+from __future__ import annotations
 
-import cv2, os, operator, math, time, pickle, itertools
-import base64, requests, collections, random
-import pandas as pd; import numpy as np
-from matplotlib import pyplot as plt
-from dotenv import dotenv_values
+import base64
+import math
+import os
+from collections.abc import Mapping
+from dataclasses import dataclass
+from pathlib import Path
+from typing import Any
 
-# TensorFlow / Keras are imported lazily inside load_custom_vgg() so that the
-# rest of the package works without a heavy deep-learning install.
-
-from sklearn.pipeline import Pipeline
-from sklearn.decomposition import TruncatedSVD
-from sklearn.linear_model import LogisticRegression
-from sklearn.preprocessing import MinMaxScaler
-from sklearn.model_selection import train_test_split
+import cv2
+import numpy as np
 
 
+FPP_DETECT_URL = os.environ.get(
+    "FPP_API_URL", "https://api-us.faceplusplus.com/facepp/v3/detect"
+)
+FPP_ATTRIBUTES = (
+    "gender,age,smiling,headpose,eyestatus,emotion,ethnicity,"
+    "eyegaze,beauty,mouthstatus,blur,facequality,skinstatus"
+)
+
+FACE_OVAL_LANDMARK_NAMES = (
+    *(f"contour_left{i}" for i in range(1, 17)),
+    "contour_chin",
+    *(f"contour_right{i}" for i in range(16, 0, -1)),
+)
+TOP_MARGIN = 0.30
+BOTTOM_MARGIN = 0.20
+MIN_SIDE_FROM_WIDTH = 1.22
 
 
+@dataclass(frozen=True)
+class PreprocessedPortrait:
+    background_removed: np.ndarray
+    framed: np.ndarray
+    cropped: np.ndarray
+    grayscale: np.ndarray
+    foreground_fraction: float
 
-def isnotebook():
-    """Return True if running inside a Jupyter/IPython notebook."""
-    try:
-        shell = get_ipython().__class__.__name__
-        if shell == 'ZMQInteractiveShell':
-            return True
-        elif shell == 'TerminalInteractiveShell':
-            return False
+
+class FacePlusPlusError(RuntimeError):
+    """Raised when Face++ rejects a request or returns unusable data."""
+
+
+def Get_Flattened_Dict(
+    data: Mapping[str, Any], parent_key: str = "", sep: str = "_"
+) -> dict[str, Any]:
+    """Flatten a nested Face++ dictionary into one level."""
+    items: list[tuple[str, Any]] = []
+    for key, value in data.items():
+        new_key = f"{parent_key}{sep}{key}" if parent_key else str(key)
+        if isinstance(value, Mapping):
+            items.extend(Get_Flattened_Dict(value, new_key, sep).items())
         else:
-            return False
-    except NameError:
-        return False
-
-def Get_Flattened_Dict(d, parent_key='', sep='_'):
-    '''Utility function that flattens nested dictionary
-    from Face++ and returns a flattened dictionary
-    '''
-    items = []
-    for k, v in d.items():
-        new_key = parent_key+sep+k if parent_key else k
-        if isinstance(v,collections.abc.MutableMapping):
-            items.extend(Get_Flattened_Dict(v,new_key,sep=sep).items())
-        else:
-            items.append((new_key,v))
+            items.append((new_key, value))
     return dict(items)
 
-def Get_Euclidean_Distance(source_representation, test_representation):
-    """Return the Euclidean (L2) distance between two feature vectors."""
-    euclidean_distance = source_representation - test_representation
-    euclidean_distance = np.sum(np.multiply(euclidean_distance, euclidean_distance))
-    return np.sqrt(euclidean_distance)
 
-def load_api_keys(location='.env'):
-    '''
-    Go to https://www.faceplusplus.com and obtain API key + secret.
-    Put your keys and secrets into a hiden file like this:
-    
-    export FREE_KEY = 'X6x5x7x8x6c6c7x8x76c6c8x8c7'
-    export FREE_SECRET = 'Xxx78x7x7x8x78x7x7x8x8x8x8'
-    export PAID_KEY = 'X6x5x7x8x6c6c7x8x76c6c8x8c7'
-    export PAID_SECRET = 'Xxx78x7x7x8x78x7x7x8x8x8x8'
-    
-    Name the hidden file as '.env'.
-    Do not include paid key and secret if you do not have them.
-    Put the '.env' file in the same folder as your program.
-    
-    Return
-    ------
-    tuple: (FREE_KEY,FREE_SECRET,PAID_KEY,PAID_SECRET)
-    '''
+def Get_Euclidean_Distance(
+    source_representation: Any, test_representation: Any
+) -> float:
+    """Return Euclidean distance between two points or vectors."""
+    source = np.asarray(source_representation, dtype=float)
+    target = np.asarray(test_representation, dtype=float)
+    return float(np.linalg.norm(source - target))
+
+
+def load_api_keys(location: str | Path = ".env") -> tuple[str, str]:
+    """Load the single Study 2 Face++ credential pair without printing it."""
+    from dotenv import dotenv_values
+
     config = dotenv_values(location)
-    FREE_KEY = config['FREE_KEY']
-    PAID_KEY = config['PAID_KEY']
-    
-    try:
-        FREE_SECRET = config['FREE_SECRET']
-        PAID_SECRET = config['PAID_SECRET']
-    except Exception:
-        FREE_SECRET = None
-        PAID_SECRET = None
-        
-    return (FREE_KEY,FREE_SECRET,PAID_KEY,PAID_SECRET)
-
-def Get_FacePlusPlus_Outputs(img,KEY,SECRET,landmark_106=2,compare_face=1):
-    '''
-    Params
-    ------
-    img          : numpy array of shape (n,n,3)
-    landmark_106 : 2 if 106-D landmarks
-    compare_face : 1 or any number
-                   if face_num>compare_face:
-                       return 0,0,0,0
-                   if there are more than one face,
-                   then it is not what we want. However, if 
-                   you know that the face you want is bigger
-                   than all other faces (i.e. in the foreground),
-                   you can set compare face to be more than 5
-                   so that the program can compare all faces and 
-                   return only the biggest face.
-    Return
-    ------
-    Features of only one face:
-    
-    (score, landmarks, attributes, rectangle) if face detected
-    (0, 0, 0, 0) if no face detected
-    '''
-    
-    # Convert img from array to string then to base64
-    img_str = cv2.imencode('.jpg',img)[-1]
-    img_64 = base64.b64encode(img_str)
-    
-    # Prepare to drop the package to face++
-    http_url = 'https://api-us.faceplusplus.com/facepp/v3/detect';
-    re_att = 'gender,age,smiling,headpose,eyestatus,emotion,ethnicity,eyegaze,beauty,mouthstatus,blur'
-    payload = {'api_key': KEY,
-               'api_secret': SECRET,
-               'image_base64': img_64,
-               'return_landmark': landmark_106,
-               'return_attributes': re_att}
-   
-    try:
-        # Request Face++, add timeout because it can get stuck
-        response = requests.post(http_url, data=payload, timeout=5)
-        face_num = response.json()['face_num']
-        response = response.json()['faces']
-
-        distances = {}
-        responses = []
-        face_count = 0
-
-        # drop image where face_num larger than compare_face=1
-        if face_num>compare_face:
-            return 0,0,0,0
-        else:
-            # Face++ returns a list of dictionaries
-            for face in response:
-
-                # Since face++ only returns the largest 5 faces
-                if face_count<5:
-
-                    # Make response into a better format for landmarks and attributes
-                    rectangle = face['face_rectangle']
-                    landmarks = {i:(v['x'],v['y']) for i,v in face['landmark'].items()}
-                    attributes = Get_Flattened_Dict(face['attributes'])
-                    
-                    # Check size of face by getting the length between eyes
-                    distance = int(Get_Euclidean_Distance(
-                        np.asarray(landmarks['left_eye_left_corner']),
-                        np.asarray(landmarks['right_eye_right_corner'])))
-
-                    score = (attributes['mouthstatus_other_occlusion'] <= 50) + \
-                    ((attributes['eyestatus_left_eye_status_occlusion'] <= 50) or \
-                     (attributes['eyestatus_right_eye_status_occlusion'] <= 50)) + \
-                    (abs(attributes['headpose_pitch_angle']) <= 10) + \
-                    (abs(attributes['headpose_yaw_angle']) <= 15) + \
-                    (distance >= 40)
-
-                    # Append distance into distances dict
-                    distances[face_count]=distance
-
-                    # Append all into a list 
-                    responses.append((score,landmarks,attributes,rectangle))
-
-                    # Face count adds one because 
-                    # I don't want it to read the no.6 and more 
-                    # Face because it returns nothing
-                    face_count+=1
-
-            # Finally, if no distance detected
-            if len(distances)==0:
-                return 0,0,0,0
-            # If there is at least one distance
-            else:
-                # Check the maximum distance and return position of key
-                selected_key = max(distances.items(), 
-                                   key=operator.itemgetter(1))[0]
-
-                # Unpack the best face using selected key position
-                final_score = responses[selected_key][0]
-                final_landmarks = responses[selected_key][1]
-                final_attributes = responses[selected_key][2]
-                final_rectangle = responses[selected_key][3]
-
-                # Return score, landmarks, attributes,rectangle in this order
-                return final_score, final_landmarks, final_attributes, final_rectangle
-
-    # If for some reason unsuccessful
-    # E.g. timeout after 2 seconds
-    # Or no 'faces' key found in response
-    except Exception:
-        # Return nothing
-        return 0,0,0,0
-    
-def get_rectangle(rectangle):
-    """Convert a Face++ rectangle dict to (top, left, width, height) coordinates."""
-    return [((rectangle['left'],
-              rectangle['top']),
-             (rectangle['left']+rectangle['width'],
-              rectangle['top'])),
-            ((rectangle['left'],
-              rectangle['top']+rectangle['height']),
-             (rectangle['left']+rectangle['width'],
-              rectangle['top']+rectangle['height']))]
-    
-def get_faceplusplus_outputs(img,key,verify_score=5):
-    '''
-    Load the key and secrets using load_api_keys(location) first.
-    This function calls the Get_FacePlusPlus_Outputs function. 
-    This function allows you to request from Face++ using free key,
-    before trying with the paid key to save $$$.
-    
-    Note that free key's priority is low and there is a limit. 
-    
-    Params
-    ------
-    img : numpy array of shape (n,n,3)
-    key : API key in tuple (FREE_KEY,FREE_SECRET,PAID_KEY,PAID_SECRET)
-    
-    Return
-    ------
-    (score, landmarks, attributes, rectangle, key)
-    (0, 0, 0, 0, key) if no face detected
-    '''
-    
-    FREE_KEY,FREE_SECRET,PAID_KEY,PAID_SECRET = key
-    
-    score,landmarks,attributes,rectangle = \
-    Get_FacePlusPlus_Outputs(img,FREE_KEY,FREE_SECRET,2,1)
-    if landmarks != 0: 
-        key = 'free | face detected'
-        if score >= verify_score:
-            return score,landmarks,attributes,get_rectangle(rectangle),key
-        else: return score,0,0,0,'free | face not detected'
-    else:
-        if (PAID_KEY is not None) & (PAID_SECRET is not None):
-            key = 'paid | face detected'
-            score,landmarks,attributes,rectangle = \
-            Get_FacePlusPlus_Outputs(img,PAID_KEY,PAID_SECRET,2,1)
-            if score >= verify_score:
-                return score,landmarks,attributes,get_rectangle(rectangle),key
-            else: return score,0,0,0,'paid | face not detected'
-        else: return score,0,0,0,'no paid key | face not detected'
-
-def get_rotated_image(img,src_lt,src_rt,dst_lt=(33,33),
-                      dst_rt=(191,33),imsize=224):
-    '''
-    The default destination points would put all the face
-    in the same area given a image size of 224x224 pixels
-    Note that the default points would put the face at the
-    very center, covering exactly 50% of the pixels.
-    The default point is calculated using the formula:
-    length = int(np.sqrt((224*224)*0.5))
-    pt1=(int(224/2-length/2),int(224/2-length/2))
-    pt2=(int(224/2+length/2),int(224/2+length/2))
-    '''
-    inPts = [tuple(src_lt),tuple(src_rt)]
-    outPts = [tuple(dst_lt),tuple(dst_rt)]
-    s60 = math.sin(60*math.pi/180)
-    c60 = math.cos(60*math.pi/180) 
-    xin = c60*(
-        inPts[0][0]-inPts[1][0])-s60*(
-        inPts[0][1]-inPts[1][1])+inPts[1][0]
-    yin = s60*(
-        inPts[0][0]-inPts[1][0])+c60*(
-        inPts[0][1]-inPts[1][1])+inPts[1][1]
-    inPts.append((int(xin),int(yin)))
-    xout = c60*(
-        outPts[0][0]-outPts[1][0])-s60*(
-        outPts[0][1]-outPts[1][1])+outPts[1][0]
-    yout = s60*(
-        outPts[0][0]-outPts[1][0])+c60*(
-        outPts[0][1]-outPts[1][1])+outPts[1][1]
-    outPts.append((int(xout),int(yout)))
-    tform = cv2.estimateAffine2D(
-        np.array([inPts]),np.array([outPts]))[0]
-    tform = np.float32(tform.flatten()[:6].reshape(2,3))
-    return cv2.warpAffine(img,tform,(imsize,imsize))
-
-def to_grayscale(img,bgr=True,vgg=True):
-    '''
-    convert to grayscale
-    default assumes rgb color image
-    
-    returns
-    =======
-    img in three dimensional array
-    '''
-    conversion = [0.1140,0.5870,0.2989] if \
-    bgr==True else [0.2989,0.5870,0.1140]
-    gray = np.dot(img[...,:3],conversion)
-    if vgg == True:
-        gray = np.clip(np.stack(
-            [gray,gray,gray],
-            axis=-1),0,1)
-    return gray
-
-    
-    
-    
-    
-from statsmodels.discrete.discrete_model import MNLogit
-from sklearn.linear_model import LogisticRegression
-from sklearn.naive_bayes import GaussianNB
-from sklearn.ensemble import RandomForestClassifier
-from sklearn.preprocessing import OneHotEncoder
-
-def Classify_LR(df,yvar='type',method='Logistic Regression'):
-    """Fit a logistic-regression classifier and return per-group prediction scores."""
-    CATS=dict(df[yvar].value_counts()).keys()
-    CATS=['Grp_{}'.format(int(i)) for i in CATS];CATS=sorted(CATS)
-    
-    clf1_md=LogisticRegression(max_iter=1000,solver='newton-cg',multi_class='auto')
-    clf2_md=RandomForestClassifier(n_estimators=100,criterion='entropy')
-    clf3_md=GaussianNB();clf1_nm='Logistic Regression'; 
-    clf2_nm='Random Forest Classifier';clf3_nm='Gaussian Naive Bayes'
-    clfs_dt=dict(zip((clf1_nm,clf2_nm,clf3_nm),(clf1_md,clf2_md,clf3_md)))
-    
-    clf=clfs_dt[method];X=df.drop(yvar,axis=1).values;y=df[yvar].values
-    clf.fit(X,y);y_scores=clf.predict_proba(X);y_h=clf.predict(X)
-    y_t=y.reshape(len(y),-1);accuracy=clf.score(X,y)
-    y_scores=pd.DataFrame(y_scores,columns=CATS,index=df.index)
-    return y_scores,y_t,accuracy
-
-def logistic_regression(df,printing=False):
-    """Fit a multinomial logit (statsmodels MNLogit) on a dataframe with a 'type' label; return the fitted result."""
-    y=df['type'].values
-    ohe=OneHotEncoder(categories='auto',sparse_output=False)
-    y_bin=ohe.fit_transform(y.reshape(len(y),-1))
-    X=df.drop(['type'],axis=1)
-    mod=MNLogit(y_bin,X);res=mod.fit()
-    if printing==True:
-        print(res.summary())
-    return res
-
-def match_df(df,scores,method='Propensity',yvar='type',threshold=0.0001):
-    """Match treatment/control rows by propensity or Euclidean distance within a threshold; return matched indices."""
-    if method=='Euclidean':
-        Prop_Names=['Prop_Score_{}'.format(j) 
-                    for j in list(set(df[yvar].values.astype(int)))]
-        df_new=df.copy();
-        group_all=dict(df[yvar].value_counts())
-        group_min=min(group_all.items(), key=operator.itemgetter(1))[0]
-        group_trt=list(set(group_all.keys()).difference({group_min}))
-        final=[];drop=[];count=1;total=len(df_new[df_new[yvar]==group_min])
-        control=df_new[df_new[yvar]==group_min]
-        for i,v in control.iterrows():
-            temp_sel={}
-            for group in group_trt:
-                test=np.square(df_new[df_new[yvar]==group].drop('type',axis=1)-v.drop('type'))
-                test=pd.DataFrame(test.sum(axis=1),index=test.index,columns=['score'])
-                test_sel=np.sqrt(test).sort_values('score')
-                name_sel=test_sel.index.values[0]
-                eucl_sel=test_sel.values[0]
-                temp_sel[name_sel]=eucl_sel
-                df_new=df_new.drop(name_sel)
-            if max(list(temp_sel.values()))<threshold:
-                final+=list(temp_sel.keys())+[i]
-            else:
-                drop.append(i)
-            print(f'Matching attributes by image: ({count}/{total})... Pruned: {len(drop)}',
-                  end='\r');count+=1                
-    elif method=='Propensity':
-        Prop_Names=['Prop_Score_{}'.format(j) 
-                    for j in list(set(df[yvar].values.astype(int)))]
-        scores.columns=Prop_Names; 
-        df=df.join(scores);
-        df_new=df.copy();
-        group_all=dict(df[yvar].value_counts())
-        group_min=min(group_all.items(),key=operator.itemgetter(1))[0]
-        group_trt=list(set(group_all.keys()).difference({group_min}))
-        final=[];drop=[];count=1;total=len(df_new[df_new[yvar]==group_min])
-        control=df_new[df_new[yvar]==group_min]
-        for i,v in control.iterrows():
-            temp_sel={}
-            for group in group_trt:
-                test=df_new[df_new[yvar]==group][Prop_Names]-v[Prop_Names]
-                test_sel=abs(test).mean(axis=1).sort_values()
-                name_sel=test_sel.index.values[0]
-                prop_sel=test_sel.values[0]
-                temp_sel[name_sel]=prop_sel
-                df_new=df_new.drop(name_sel)
-            if max(list(temp_sel.values()))<threshold:
-                final+=list(temp_sel.keys())+[i]
-            else:
-                drop.append(i)
-            print(f'Matching attributes by image: ({count}/{total})... Pruned: {len(drop)}',
-                  end='\r');count+=1
-
-    else:
-        print('Please specify a method...')
-    print()
-    return list(set(final))
-
-# load the attributes
-def load_data(sex,N=None):
-    """Load and stack per-category image/attribute data from a directory into a dataframe."""
-    
-    # load groundtruths
-    def load_gts(sex):
-        gts = pd.DataFrame([[i.split('_')[2],
-                             i.split('_')[0],
-                             i.split('_')[1]] \
-               for i in os.listdir('./tinder-scraper/images/download/') \
-               if len(i)>20])
-        gts = gts.rename({0:'index',1:'age',2:'group'},axis=1)
-        gts['age']       = gts[['age']].astype(int)
-        gts['gender']    = gts.apply((lambda x: 1 if 'woman' in x['group'] else 0),axis=1)
-        gts['sexuality'] = gts.apply((lambda x: 0 if 'straight' in x['group'] else 1),axis=1)
-        gts = gts[(gts['age'] >= 18) & (gts['age'] <= 40)].set_index('index')
-
-        return gts[gts['gender']==0] if sex =='man' else gts[gts['gender']==1]
-    
-    gts = load_gts(sex)
-    attributes = {}
-    facial_images = {}
-    
-    for cat in ['gayman','straightman'] if sex =='man' else ['lesbianwoman','straightwoman']:
-        
-        attributes[cat] = {} ; count = 1
-        src_dir = f'./Data/cleaned/{cat}/'
-    
-    #######   #######   #######   #######   #######   #######   #######   #######           
-    
-        for idx in os.listdir(src_dir)[:N]:
-    
-    #######   #######   #######   #######   #######   #######   #######   #######               
-
-            print(f'Loading {cat} data: ({count}/{len(os.listdir(src_dir))})',
-                  end='\r') ; count+=1
-
-            for img in os.listdir(src_dir+idx):
-
-                with open(src_dir+idx+'/'+img,'rb') as f:
-                    loaded = pickle.load(f)
-                
-                facial_images[f'{cat}/{idx}/{img}'] = loaded['img']
-                attribute_data = loaded['attributes']
-
-                if attribute_data != 0:
-
-                    attribute_data.update({'Age':gts.loc[idx]['age']})
-                    attribute_data.update({'Sexuality':gts.loc[idx]['sexuality']})
-                    attribute_data.update({'Image':int(img.split('.pickle')[0])-1})
-                    attributes[cat][f'{cat}/{idx}/{img}'] = attribute_data
-            
-    return attributes,facial_images
-
-def clean_attributes(final_data):
-    """Clean and flatten raw Face++ attribute output into tidy numeric columns."""
-    
-    def clean(df):
-        df=df.dropna(axis=0,how='any');
-        df['Beauty']=(df['beauty_female_score']+df['beauty_male_score'])//2
-        df['Neutral']=df.apply((lambda x:0 if x['emotion_neutral']<50 else 1),axis=1)
-        df['Anger']=df.apply((lambda x:0 if x['emotion_anger']<50 else 1),axis=1)
-        df['Surprise']=df.apply((lambda x:0 if x['emotion_surprise']<50 else 1),axis=1)
-        df['Disgust']=df.apply((lambda x:0 if x['emotion_disgust']<50 else 1),axis=1)
-        df['Sadness']=df.apply((lambda x:0 if x['emotion_sadness']<50 else 1),axis=1)
-        df['Happiness']=df.apply((lambda x:0 if x['emotion_happiness']<50 else 1),axis=1)
-        df['glass_value']=df[['glass_value']].replace({'None':0,'Normal':1,'Dark':1})
-        df['Glasses']=df['glass_value']
-        df['Eyes']=df[['eyestatus_left_eye_status_no_glass_eye_close',
-                       'eyestatus_left_eye_status_normal_glass_eye_close',
-                       'eyestatus_right_eye_status_no_glass_eye_close',
-                       'eyestatus_right_eye_status_normal_glass_eye_close']].sum(axis=1).astype(int)
-        df['Eyes']=df.apply((lambda x:0 if x['Eyes']<1 else 1),axis=1)
-        df['Smiling']=(df['smile_value'])
-        df['Roll']=df['headpose_roll_angle']
-        df['Yaw']=df['headpose_yaw_angle']
-        df['Pitch']=df['headpose_pitch_angle']
-        df=df[['Age',
-               'Sexuality',
-               'Image',
-               'Beauty',
-               'Neutral',
-               'Happiness',
-               'Anger',
-               'Surprise',
-               'Disgust',
-               'Sadness',
-               'Eyes',
-               'Glasses',
-               'Smiling',
-               'Roll',
-               'Yaw',
-               'Pitch']]
-        df.index=df.index.astype(str)
-
-        return df.astype(int)
-
-    dfs = []
-    for i in final_data.keys():
-        print(f'Cleaning {i}')
-        convert_age = pd.DataFrame.from_dict(final_data[i],orient='index')        
-        convert_age['Age'] = convert_age.apply((lambda x:x['Age'] if isinstance(x['Age'],np.int64) \
-                                                else x['Age'][1]),axis=1)
-        convert_age['Sexuality'] = convert_age.apply((lambda x:x['Sexuality'] if \
-                                                      isinstance(x['Sexuality'],np.int64)
-                                                      else x['Sexuality'][1]),axis=1)
-        df_ = clean(convert_age)
-        df_['type'] = 0 if 'straight' in i else 1
-        dfs.append(df_)
-        
-    return pd.concat(dfs)
-
-def split_attributes(sex,df,test_size=.15,final_dfs={},predictor=''):
-    """Split attribute data into train/test sets per category for a given predictor."""
-    
-    train_loc,test_loc = train_test_split(df[df['Image']==0].index.tolist(),
-                                          test_size=test_size)
-    
-    for split,locs in {'train':train_loc,'test':test_loc}.items():
-        idx_u = []
-        for i in locs:
-            for j in range(1,11):
-                idx_u.append(i.split('1.pickle')[0]+f'{j}.pickle')
-                
-        final_dfs[split] = df.loc[set(df.index).intersection(set(idx_u))]
-    
-    print('Split into train-test sets')
-    
-    with open(f'./Data/test_set_{sex}_{predictor}.pickle','wb') as f:
-        pickle.dump(final_dfs['test'].index.tolist(),f)
-    print('Dumped test set, returning train set')
-    return final_dfs['train']
-
-def match_age(attributes):
-    """Match samples across groups on age to balance the age distribution."""
-    
-    def match(df,yvar='type'):
-        group_all = dict(df[yvar].value_counts())
-        min_group = min(group_all.items(),key=operator.itemgetter(1))[0]
-        max_group = max(group_all.items(),key=operator.itemgetter(1))[0]
-        if min_group == max_group:
-            min_group = 1; max_group = 0
-        group_ctl = df[df[yvar]==min_group].sample(frac=1,random_state=1)
-        group_trt = df[df[yvar]==max_group].sample(frac=1,random_state=1)
-
-        final = []
-        drop  = []
-        count = 1
-        total = len(group_ctl)
-
-        for i,v in group_ctl.iterrows():
-
-    #######   #######   #######   #######   #######   #######   #######   #######   
-
-            selected = abs(group_trt[['Age']]-v['Age'])<=1
-
-    #######   #######   #######   #######   #######   #######   #######   #######   
-
-            selected = selected[selected['Age']==True]
-            if selected.shape[0]>0:
-                selected_index = selected.index[0]
-                group_trt.drop(selected_index,axis=0,inplace=True)
-                final+=[selected_index]+[i]
-            else: 
-                drop.append(i)
-
-            print('Matching age by individual: ({}/{})... Pruned: {}'.format(count,total,len(drop)),
-                          end='\r');count+=1
-        print()
-        return list(set(final))
-    
-    locs = match(attributes[attributes['Image']==0])
-    idx_u = []
-    for i in locs:
-        for j in range(1,11):
-            idx_u.append(i.split('1.pickle')[0]+f'{j}.pickle')
-
-    return attributes.loc[set(attributes.index).intersection(set(idx_u))]
-
-def match_attributes(df,threshold=0.0001):
-    """Match samples across groups on facial attributes within a distance threshold."""
-    
-    y_scores,_,_ = Classify_LR(df)
-    df_b = df.loc[match_df(df,y_scores,threshold=threshold)]
-    df_a = pd.concat([df[df['type']==0].sample(df_b.type.value_counts()[0]),
-                      df[df['type']==1].sample(df_b.type.value_counts()[1])])
-    
-    df_a = df_a.sample(frac=1)
-
-    _,_,scores_a = Classify_LR(df_a)
-    _,_,scores_b = Classify_LR(df_b)
-    
-    print(f'Acc of Train Set A: {round(scores_a,3)} | N: {len(df_a)}')
-    print(f'Acc of Train Set B: {round(scores_b,3)} | N: {len(df_b)}')
-
-    return df_a,df_b
-
-
-
-
-
-def get_dist_angle(X):
-    """Return pairwise distances and angles between landmark points."""
-    
-    distance = []
-    angle = []
-    for i in itertools.combinations(X,2):
-        distance.append(Get_Euclidean_Distance(i[0],i[1])/224)
-        angle.append(np.rad2deg(np.arctan((abs(i[0][1]-i[1][1]+2e-52))/\
-                                          (abs(i[0][0]-i[1][0]+2e-52))))/180)
-        
-    return distance + angle
-
-
-
-
-
-def augment_img(temp,cat,
-                augment_type='baseline',
-                augment_value=0,bgr=True):
-    '''
-    Params
-    ------
-    img          : numpy array of shape (224,224,3),
-                   either normalized (0 to 1) or not (0 to 255).
-    cat          : REQUIRED for blur & augment_value==2
-                   because it is used to load the mean rgb value
-                   of the dataset from pickle.
-    augment_type : ['baseline','mask','border','blur','pixel']
-    augment_value: 0 to 1 continuous variable
-    bgr          : VGG-Face is trained using BGR images.
-                   Thus, it is important to return the right
-                   dimension but for plotting graphs, return
-                   the RGB image by setting bgr = False.
-    Return
-    ------
-    img in the shape and format: 
-        image shape = [height,width,color channels]
-        color channels = [blue,green,red]
-    '''
-    img = temp.copy()
-    if (np.max(img)<=1):
-        img = img.astype(float)
-    elif (np.max(img)>1):
-        img = (img/255).astype(float)
-    
-    # initiate the mask
-    length = int(np.sqrt((224*224)*augment_value))
-    pt1 = (int(img.shape[0]/2-length/2),int(img.shape[0]/2-length/2))
-    pt2 = (int(img.shape[0]/2+length/2),int(img.shape[0]/2+length/2))
-    mask = cv2.rectangle(np.zeros(img.shape),pt1,pt2,(255,255,255),-1)/255
-    
-    # initiate the noise
-    noise = np.clip(np.random.normal(0.5,0.1,(224,224,3)),0,1)
-    
-    if augment_type=='mask':
-        if augment_value==0:
-            pass
-        else:
-            img = np.clip(img*(1-mask),0,1)
-            
-    elif (augment_type=='border'):
-        if augment_value==0:
-            pass
-        else:
-            img = np.clip(img*(mask),0,1)
-        
-    elif (augment_type=='pixel'):
-        if augment_value==0:
-            pass
-        else:
-            img = img*(1-augment_value)+noise*(augment_value)
-            
-    elif (augment_type=='blur'):
-        k = int(augment_value*30)
-        b_deg = [224,112,74,56,44,37,32,28,24,22,20,19,18,17,
-                 16,15,14,13,12,11,10,9,8,7,6,5,4,3,2,1,1]
-        if k==0:
-            pass
-        elif 1<=k<30:
-            img = cv2.resize(img,(b_deg[k],b_deg[k]),interpolation=cv2.INTER_AREA)
-            img = cv2.resize(img,(224,224),interpolation=cv2.INTER_AREA)
-        elif k==30:
-            img = np.ones((224,224,3))*(np.array([dataset_rgb[cat]['mu']]))  
-    else:
-        pass
-    
-    if bgr==True:
-        # convert rgb to bgr because vggface model was trained using bgr
-        img = cv2.cvtColor((img*255).astype(np.uint8),cv2.COLOR_RGB2BGR)
-        img = img/255
-
-    return np.clip(img,0,1)
-
-
-
-
-
-def load_custom_vgg(model_fp='./models/vggface.h5'):
-    """Build the VGGFace feature extractor. Requires TensorFlow/Keras
-    (install with: pip install face_utils[deep])."""
-    try:
-        import tensorflow.keras.backend as K
-        from tensorflow.keras import layers
-        from tensorflow.keras.models import Model
-    except ImportError as e:
-        raise ImportError(
-            "load_custom_vgg requires TensorFlow. Install it with "
-            "`pip install face_utils[deep]` or `pip install tensorflow`."
-        ) from e
-    K.clear_session()
-
-    # Input tensor
-    I = layers.Input(shape=(224,224,3))
-
-    # Block 1
-    x = layers.Convolution2D(64,(3,3),activation='relu',padding='same',name='conv1_1')(I)
-    x = layers.Convolution2D(64,(3,3),activation='relu',padding='same',name='conv1_2')(x)
-    x = layers.MaxPooling2D((2,2),strides=(2,2),name='pool1')(x)
-
-    # Block 2
-    x = layers.Convolution2D(128,(3,3),activation='relu',padding='same',name='conv2_1')(x)
-    x = layers.Convolution2D(128,(3,3),activation='relu',padding='same',name='conv2_2')(x)
-    x = layers.MaxPooling2D((2,2),strides=(2,2),name='pool2')(x)
-
-    # Block 3
-    x = layers.Convolution2D(256,(3,3),activation='relu',padding='same',name='conv3_1')(x)
-    x = layers.Convolution2D(256,(3,3),activation='relu',padding='same',name='conv3_2')(x)
-    x = layers.Convolution2D(256,(3,3),activation='relu',padding='same',name='conv3_3')(x)
-    x = layers.MaxPooling2D((2,2),strides=(2,2),name='pool3')(x)
-
-    # Block 4
-    x = layers.Convolution2D(512,(3,3),activation='relu',padding='same',name='conv4_1')(x)
-    x = layers.Convolution2D(512,(3,3),activation='relu',padding='same',name='conv4_2')(x)
-    x = layers.Convolution2D(512,(3,3),activation='relu',padding='same',name='conv4_3')(x)
-    x = layers.MaxPooling2D((2,2),strides=(2,2),name='pool4')(x)
-
-    # Block 5
-    x = layers.Convolution2D(512,(3,3),activation='relu',padding='same',name='conv5_1')(x)
-    x = layers.Convolution2D(512,(3,3),activation='relu',padding='same',name='conv5_2')(x)
-    x = layers.Convolution2D(512,(3,3),activation='relu',padding='same',name='conv5_3')(x)
-    x = layers.MaxPooling2D((2,2),strides=(2,2),name='pool5')(x)
-
-    # Classification block
-    x = layers.Flatten(name='flatten')(x)
-    x = layers.Dense(4096, name='fc6')(x)
-    x = layers.Activation('relu', name='fc6/relu')(x)
-    x = layers.Dense(4096, name='fc7')(x)
-    x = layers.Activation('relu', name='fc7/relu')(x)
-    x = layers.Dense(2622, name='fc8')(x)
-    O = layers.Activation('softmax', name='fc8/softmax')(x)
-
-    # Create the original model
-    vggface = Model(I,O)
-    vggface.load_weights(model_fp)
-    vggface.trainable=False
-
-    # return the custom VGG model
-    return Model(inputs=vggface.input, outputs=vggface.get_layer('fc7/relu').output)
-
-def load_custom_lr():
-    """Load a pre-fit logistic-regression pipeline for scoring."""
-    # return the custom SVD and LR model
-    return Pipeline(steps=[('svd', TruncatedSVD(n_components=500)),
-                           ('lr', LogisticRegression(penalty='l1',
-                                                     solver='liblinear'))],verbose=100)
-
-
-
-# ---------------------------------------------------------------------------
-# Facial width-to-height ratio (fWHR)
-# ---------------------------------------------------------------------------
-# fWHR = bizygomatic width / upper-facial height, following Weston et al. (2007)
-# and as used in Wang et al. (2019, Psychological Science) and Kosinski (2017,
-# Psychological Science). Bizygomatic width is the maximum horizontal distance
-# between the left and right facial (cheek) boundaries; upper-facial height is
-# the vertical distance from the brow (upper eyelid / eyebrow line) to the upper
-# lip. Both papers report that fWHR predicts *perception* far more reliably than
-# it predicts behavior, so treat downstream fWHR-behavior claims with care.
-
-
-def fwhr_from_points(left_cheek, right_cheek, brow, upper_lip):
-    """Compute facial width-to-height ratio (fWHR) from four (x, y) points.
-
-    Parameters
-    ----------
-    left_cheek, right_cheek : tuple(float, float)
-        Left/right facial-boundary points at the widest (bizygomatic) level.
-    brow : tuple(float, float)
-        Upper-facial-height top reference (brow / upper-eyelid line).
-    upper_lip : tuple(float, float)
-        Upper-facial-height bottom reference (top of the upper lip).
-
-    Returns
-    -------
-    float
-        width / height. Raises ValueError if the height is zero.
-    """
-    width = abs(float(right_cheek[0]) - float(left_cheek[0]))
-    height = abs(float(upper_lip[1]) - float(brow[1]))
-    if height == 0:
-        raise ValueError("Upper-facial height is zero; check the brow/upper_lip points.")
-    return width / height
-
-
-# Default Face++ landmark keys for each fWHR reference point. Override these if
-# your landmark model uses different names.
-_FWHR_DEFAULT_KEYS = {
-    "left_cheek": "contour_left1",
-    "right_cheek": "contour_right1",
-    "brow": "left_eyebrow_upper_middle",
-    "upper_lip": "mouth_upper_lip_top",
-}
-
-
-def compute_fwhr(landmarks, keys=None):
-    """Compute fWHR from a Face++ landmarks dict ``{name: (x, y)}``.
-
-    Parameters
-    ----------
-    landmarks : dict
-        Mapping of landmark name -> (x, y), as returned by
-        ``Get_FacePlusPlus_Outputs`` / ``get_faceplusplus_outputs``.
-    keys : dict, optional
-        Overrides for which landmark names identify the four reference points
-        (``left_cheek``, ``right_cheek``, ``brow``, ``upper_lip``). Defaults to
-        the Face++ 106-point names in ``_FWHR_DEFAULT_KEYS``.
-
-    Returns
-    -------
-    float
-        The facial width-to-height ratio.
-
-    Raises
-    ------
-    KeyError
-        If a required landmark name is missing from ``landmarks``.
-    """
-    k = dict(_FWHR_DEFAULT_KEYS)
-    if keys:
-        k.update(keys)
-    missing = [name for name in k.values() if name not in landmarks]
-    if missing:
-        raise KeyError(
-            "Missing landmark(s) for fWHR: {}. Pass `keys=` to map to your "
-            "landmark model's names.".format(missing)
+    key = os.environ.get("FPP_KEY") or config.get("FPP_KEY")
+    secret = os.environ.get("FPP_SECRET") or config.get("FPP_SECRET")
+    if not key or not secret:
+        raise FacePlusPlusError(
+            "No Face++ credentials were found. Set FPP_KEY and FPP_SECRET."
         )
-    return fwhr_from_points(
-        landmarks[k["left_cheek"]],
-        landmarks[k["right_cheek"]],
-        landmarks[k["brow"]],
-        landmarks[k["upper_lip"]],
+    return str(key), str(secret)
+
+
+def _encode_jpeg(image: np.ndarray) -> bytes:
+    if image is None or image.size == 0:
+        raise ValueError("The input image is empty.")
+    ok, encoded = cv2.imencode(".jpg", image)
+    if not ok:
+        raise ValueError("OpenCV could not encode the input image as JPEG.")
+    return base64.b64encode(encoded.tobytes())
+
+
+def _point(landmarks: Mapping[str, tuple[float, float]], name: str):
+    value = landmarks.get(name)
+    return None if value is None else np.asarray(value, dtype=float)
+
+
+def _eye_center(
+    landmarks: Mapping[str, tuple[float, float]], side: str
+) -> tuple[float, float]:
+    direct_names = (
+        f"{side}_eye_center",
+        f"{side}_eye_pupil",
     )
+    for name in direct_names:
+        value = _point(landmarks, name)
+        if value is not None:
+            return float(value[0]), float(value[1])
+
+    corner_names = (
+        f"{side}_eye_left_corner",
+        f"{side}_eye_right_corner",
+    )
+    corners = [_point(landmarks, name) for name in corner_names]
+    if all(point is not None for point in corners):
+        center = np.mean(np.stack(corners), axis=0)
+        return float(center[0]), float(center[1])
+
+    pupil_points = [
+        np.asarray(value, dtype=float)
+        for name, value in landmarks.items()
+        if name.startswith(f"{side}_eye_") and "eyebrow" not in name
+    ]
+    if pupil_points:
+        center = np.mean(np.stack(pupil_points), axis=0)
+        return float(center[0]), float(center[1])
+
+    raise FacePlusPlusError(f"Face++ response has no usable {side}-eye landmarks.")
+
+
+def get_eye_centers(
+    landmarks: Mapping[str, tuple[float, float]],
+) -> tuple[tuple[float, float], tuple[float, float]]:
+    """Return robust left/right eye centers from Face++ landmark names."""
+    return _eye_center(landmarks, "left"), _eye_center(landmarks, "right")
+
+
+def scale_landmarks(
+    landmarks: Mapping[str, tuple[float, float]],
+    scale_x: float,
+    scale_y: float,
+) -> dict[str, tuple[float, float]]:
+    """Map landmarks from an API-sized image back to the source image."""
+    return {
+        name: (float(point[0]) * scale_x, float(point[1]) * scale_y)
+        for name, point in landmarks.items()
+    }
+
+
+def get_face_oval_points(
+    landmarks: Mapping[str, tuple[float, float]],
+) -> np.ndarray:
+    """Return the Face++ face-contour points used for dynamic cropping."""
+    points = [
+        np.asarray(landmarks[name], dtype=np.float64)
+        for name in FACE_OVAL_LANDMARK_NAMES
+        if name in landmarks
+    ]
+    if len(points) < 5:
+        raise FacePlusPlusError("Face++ response has no usable face contour.")
+    return np.stack(points)
+
+
+def _fit_square_to_source(
+    left: float, top: float, side: float, width: int, height: int
+) -> tuple[int, int, int, int]:
+    side_i = int(round(min(side, width, height)))
+    if side_i < 1:
+        raise ValueError("The calculated face crop is empty.")
+    left_i = min(max(0, int(round(left))), width - side_i)
+    top_i = min(max(0, int(round(top))), height - side_i)
+    return left_i, top_i, left_i + side_i, top_i + side_i
+
+
+def _dynamic_crop_box(
+    points: np.ndarray,
+    width: int,
+    height: int,
+    top_margin: float,
+    bottom_margin: float,
+    min_side_from_width: float,
+) -> tuple[int, int, int, int]:
+    x_min, y_min = points.min(axis=0)
+    x_max, y_max = points.max(axis=0)
+    oval_width = float(x_max - x_min)
+    oval_height = float(y_max - y_min)
+    desired_top = float(y_min) - top_margin * oval_height
+    desired_bottom = float(y_max) + bottom_margin * oval_height
+    side = max(desired_bottom - desired_top, min_side_from_width * oval_width)
+    center_x = float(x_min + x_max) / 2.0
+    center_y = (desired_top + desired_bottom) / 2.0
+    return _fit_square_to_source(
+        center_x - side / 2.0,
+        center_y - side / 2.0,
+        side,
+        width,
+        height,
+    )
+
+
+def get_landmark_aligned_crop(
+    img: np.ndarray,
+    landmarks: Mapping[str, tuple[float, float]],
+    output_size: int = 224,
+    top_margin: float = TOP_MARGIN,
+    bottom_margin: float = BOTTOM_MARGIN,
+    min_side_from_width: float = MIN_SIDE_FROM_WIDTH,
+    return_details: bool = False,
+):
+    """Level the eyes, dynamically crop the face oval, and resize to a square.
+
+    Unlike the legacy affine transform, this does not force the eyes to fixed
+    output coordinates. It rotates around the eye midpoint, derives a padded
+    square from the aligned Face++ contour, then resizes that square to 224.
+    """
+    image = np.asarray(img)
+    if image.ndim != 3 or image.shape[2] < 3:
+        raise ValueError("Expected an H x W x 3 color image.")
+    height, width = image.shape[:2]
+    eye_a, eye_b = (
+        np.asarray(point, dtype=np.float64) for point in get_eye_centers(landmarks)
+    )
+    if eye_a[0] > eye_b[0]:
+        eye_a, eye_b = eye_b, eye_a
+    delta = eye_b - eye_a
+    if np.linalg.norm(delta) < 1e-6:
+        raise FacePlusPlusError("The two eye centers overlap.")
+    angle = math.degrees(math.atan2(float(delta[1]), float(delta[0])))
+    midpoint = tuple(((eye_a + eye_b) / 2.0).tolist())
+
+    edge_width = max(1, min(8, height, width))
+    edge_pixels = np.concatenate(
+        (
+            image[:edge_width, :, :3].reshape(-1, 3),
+            image[-edge_width:, :, :3].reshape(-1, 3),
+            image[:, :edge_width, :3].reshape(-1, 3),
+            image[:, -edge_width:, :3].reshape(-1, 3),
+        ),
+        axis=0,
+    )
+    fill = tuple(int(value) for value in np.median(edge_pixels, axis=0))
+    border_value = fill if image.shape[2] == 3 else (*fill, 0)
+    transform = cv2.getRotationMatrix2D(midpoint, angle, 1.0)
+    aligned = cv2.warpAffine(
+        image,
+        transform,
+        (width, height),
+        flags=cv2.INTER_CUBIC,
+        borderMode=cv2.BORDER_CONSTANT,
+        borderValue=border_value,
+    )
+
+    original_oval = get_face_oval_points(landmarks)
+    homogeneous = np.column_stack((original_oval, np.ones(len(original_oval))))
+    aligned_oval = homogeneous @ transform.T
+    crop_box = _dynamic_crop_box(
+        aligned_oval,
+        width,
+        height,
+        top_margin,
+        bottom_margin,
+        min_side_from_width,
+    )
+    left, top, right, bottom = crop_box
+    cropped = aligned[top:bottom, left:right]
+    resized = cv2.resize(
+        cropped,
+        (output_size, output_size),
+        interpolation=cv2.INTER_LANCZOS4,
+    )
+
+    aligned_corners = np.asarray(
+        [(left, top), (right, top), (right, bottom), (left, bottom)],
+        dtype=np.float64,
+    )
+    inverse = cv2.invertAffineTransform(transform)
+    corner_homogeneous = np.column_stack(
+        (aligned_corners, np.ones(len(aligned_corners)))
+    )
+    original_frame = corner_homogeneous @ inverse.T
+    details = {
+        "rotation_angle_degrees": float(angle),
+        "crop_box_xyxy": crop_box,
+        "original_display_frame_corners": original_frame,
+        "original_face_oval_points": original_oval,
+        "top_margin_ratio": float(top_margin),
+        "bottom_margin_ratio": float(bottom_margin),
+        "min_side_from_width": float(min_side_from_width),
+    }
+    return (resized, details) if return_details else resized
+
+
+def draw_crop_frame_and_contour(
+    img: np.ndarray,
+    frame_corners: np.ndarray,
+    contour_points: np.ndarray,
+) -> np.ndarray:
+    """Draw the trial's blue crop frame and purple contour on the source."""
+    result = np.asarray(img).copy()
+    height, width = result.shape[:2]
+    line_width = max(4, round(min(width, height) / 180))
+    radius = max(3, round(min(width, height) / 220))
+    polygon = np.rint(frame_corners).astype(np.int32).reshape((-1, 1, 2))
+    line_color = (204, 102, 0, 255) if result.shape[2] == 4 else (204, 102, 0)
+    point_color = (255, 99, 108, 255) if result.shape[2] == 4 else (255, 99, 108)
+    cv2.polylines(
+        result,
+        [polygon],
+        isClosed=True,
+        color=line_color,
+        thickness=line_width,
+        lineType=cv2.LINE_AA,
+    )
+    for x, y in np.rint(contour_points).astype(np.int32):
+        cv2.circle(
+            result,
+            (int(x), int(y)),
+            radius,
+            color=point_color,
+            thickness=-1,
+            lineType=cv2.LINE_AA,
+        )
+    return result
+
+
+class PersonSegmenter:
+    """Reusable MediaPipe person segmenter for complete raw portraits."""
+
+    def __init__(
+        self,
+        model_path: str | Path,
+        lower_confidence: float = 0.12,
+        upper_confidence: float = 0.78,
+    ) -> None:
+        self.model_path = Path(model_path)
+        self.lower_confidence = float(lower_confidence)
+        self.upper_confidence = float(upper_confidence)
+        self._mp = None
+        self._segmenter = None
+        if not self.model_path.exists():
+            raise FileNotFoundError("The person-segmentation model was not found.")
+        if not 0 <= self.lower_confidence < self.upper_confidence <= 1:
+            raise ValueError(
+                "Segmentation confidence bounds must satisfy 0 <= lower < upper <= 1."
+            )
+
+    def _open(self) -> None:
+        if self._segmenter is not None:
+            return
+        try:
+            import mediapipe as mp
+        except ImportError as exc:
+            raise RuntimeError(
+                "MediaPipe is required for background removal. Install project requirements."
+            ) from exc
+        options = mp.tasks.vision.ImageSegmenterOptions(
+            base_options=mp.tasks.BaseOptions(model_asset_path=str(self.model_path)),
+            running_mode=mp.tasks.vision.RunningMode.IMAGE,
+            output_confidence_masks=True,
+            output_category_mask=False,
+        )
+        self._mp = mp
+        self._segmenter = mp.tasks.vision.ImageSegmenter.create_from_options(options)
+
+    def segment(self, img: np.ndarray) -> np.ndarray:
+        """Return a soft float32 person alpha mask in the range [0, 1]."""
+        image = np.asarray(img)
+        if image.ndim != 3 or image.shape[2] < 3:
+            raise ValueError("Expected an H x W x 3 color image for segmentation.")
+        self._open()
+        rgb = np.ascontiguousarray(
+            cv2.cvtColor(image[..., :3], cv2.COLOR_BGR2RGB)
+        )
+        result = self._segmenter.segment(
+            self._mp.Image(image_format=self._mp.ImageFormat.SRGB, data=rgb)
+        )
+        if not result.confidence_masks:
+            raise ValueError("Person segmentation returned no confidence mask.")
+        confidence = np.asarray(
+            result.confidence_masks[0].numpy_view(), dtype=np.float32
+        ).copy()
+        return self._refine(confidence, image.shape[:2])
+
+    def _refine(
+        self, confidence: np.ndarray, image_shape: tuple[int, int]
+    ) -> np.ndarray:
+        height, width = image_shape
+        if confidence.shape != image_shape:
+            confidence = cv2.resize(
+                confidence, (width, height), interpolation=cv2.INTER_LINEAR
+            )
+        alpha = np.clip(
+            (confidence - self.lower_confidence)
+            / (self.upper_confidence - self.lower_confidence),
+            0,
+            1,
+        )
+        alpha = alpha * alpha * (3 - 2 * alpha)
+        return np.clip(cv2.GaussianBlur(alpha, (0, 0), 0.8), 0, 1).astype(
+            np.float32
+        )
+
+    def close(self) -> None:
+        if self._segmenter is not None:
+            self._segmenter.close()
+            self._segmenter = None
+
+    def __enter__(self):
+        self._open()
+        return self
+
+    def __exit__(self, exc_type, exc_value, traceback) -> None:
+        self.close()
+
+
+def get_person_alpha(
+    img: np.ndarray,
+    model_path: str | Path,
+    lower_confidence: float = 0.12,
+    upper_confidence: float = 0.78,
+) -> np.ndarray:
+    """One-shot convenience wrapper around :class:`PersonSegmenter`."""
+    with PersonSegmenter(
+        model_path,
+        lower_confidence=lower_confidence,
+        upper_confidence=upper_confidence,
+    ) as segmenter:
+        return segmenter.segment(img)
+
+
+def apply_person_alpha(
+    img: np.ndarray, alpha: np.ndarray, hidden_background_value: int = 238
+) -> np.ndarray:
+    """Attach person alpha as BGRA and erase RGB under transparent pixels.
+
+    Erasing hidden RGB prevents applications that ignore PNG alpha from
+    revealing the original background.
+    """
+    image = np.asarray(img)
+    mask = np.asarray(alpha, dtype=np.float32)
+    if image.ndim != 3 or image.shape[2] < 3 or mask.shape != image.shape[:2]:
+        raise ValueError("Image and alpha dimensions do not match.")
+    if not 0 <= hidden_background_value <= 255:
+        raise ValueError("hidden_background_value must be between 0 and 255.")
+    alpha_u8 = np.rint(np.clip(mask, 0, 1) * 255).astype(np.uint8)
+    visible_bgr = image[..., :3].copy()
+    visible_bgr[alpha_u8 == 0] = hidden_background_value
+    return np.dstack((visible_bgr, alpha_u8))
+
+
+def composite_transparency(
+    img: np.ndarray, background_value: int = 238
+) -> np.ndarray:
+    """Composite BGRA onto a neutral BGR background for stable grayscale."""
+    image = np.asarray(img)
+    if image.ndim != 3 or image.shape[2] != 4:
+        raise ValueError("Expected an H x W x 4 BGRA image.")
+    if not 0 <= background_value <= 255:
+        raise ValueError("background_value must be between 0 and 255.")
+    alpha = image[..., 3:4].astype(np.float32) / 255.0
+    composed = (
+        image[..., :3].astype(np.float32) * alpha
+        + float(background_value) * (1.0 - alpha)
+    )
+    return np.rint(composed).astype(np.uint8)
+
+
+def preprocess_portrait(
+    img: np.ndarray,
+    landmarks: Mapping[str, tuple[float, float]],
+    segmenter: PersonSegmenter,
+    grayscale_background: int = 238,
+) -> PreprocessedPortrait:
+    """Run background removal, framing, cropping, and grayscale conversion."""
+    image = np.asarray(img)
+    person_alpha = segmenter.segment(image)
+    background_removed = apply_person_alpha(
+        image,
+        person_alpha,
+        hidden_background_value=grayscale_background,
+    )
+    cropped, crop_details = get_landmark_aligned_crop(
+        background_removed,
+        landmarks,
+        return_details=True,
+    )
+    framed = draw_crop_frame_and_contour(
+        background_removed,
+        crop_details["original_display_frame_corners"],
+        crop_details["original_face_oval_points"],
+    )
+    grayscale_source = composite_transparency(
+        cropped,
+        background_value=grayscale_background,
+    )
+    grayscale = np.rint(
+        to_grayscale(grayscale_source, bgr=True, vgg=False) * 255.0
+    ).astype(np.uint8)
+    return PreprocessedPortrait(
+        background_removed=background_removed,
+        framed=framed,
+        cropped=cropped,
+        grayscale=grayscale,
+        foreground_fraction=float((person_alpha >= 0.5).mean()),
+    )
+
+
+def _quality_score(
+    landmarks: Mapping[str, tuple[float, float]], attributes: Mapping[str, Any]
+) -> int:
+    """Reproduce the original repository's five-part usability score."""
+    left_eye, right_eye = get_eye_centers(landmarks)
+    eye_distance = Get_Euclidean_Distance(left_eye, right_eye)
+    mouth_ok = float(attributes.get("mouthstatus_other_occlusion", 100)) <= 50
+    left_eye_ok = float(attributes.get("eyestatus_left_eye_status_occlusion", 100)) <= 50
+    right_eye_ok = float(attributes.get("eyestatus_right_eye_status_occlusion", 100)) <= 50
+    pitch_ok = abs(float(attributes.get("headpose_pitch_angle", 999))) <= 10
+    yaw_ok = abs(float(attributes.get("headpose_yaw_angle", 999))) <= 15
+    size_ok = eye_distance >= 40
+    return int(mouth_ok) + int(left_eye_ok or right_eye_ok) + int(pitch_ok) + int(yaw_ok) + int(size_ok)
+
+
+def Get_FacePlusPlus_Outputs(
+    img: np.ndarray,
+    FPP_KEY: str,
+    FPP_SECRET: str,
+    landmark_106: int = 2,
+    compare_face: int = 1,
+    timeout: float = 15.0,
+) -> tuple[int, dict[str, tuple[float, float]], dict[str, Any], dict[str, Any]]:
+    """Call Face++ and return the largest usable face.
+
+    This keeps the legacy function name and four-value return shape, but unlike
+    the original implementation it raises a descriptive exception instead of
+    silently turning every API/network error into four zeroes.
+    """
+    payload = {
+        "api_key": FPP_KEY,
+        "api_secret": FPP_SECRET,
+        "image_base64": _encode_jpeg(img),
+        "return_landmark": landmark_106,
+        "return_attributes": FPP_ATTRIBUTES,
+    }
+    import requests
+
+    try:
+        response = requests.post(FPP_DETECT_URL, data=payload, timeout=timeout)
+        response.raise_for_status()
+        body = response.json()
+    except requests.RequestException as exc:
+        raise FacePlusPlusError(f"Face++ request failed: {exc}") from exc
+    except ValueError as exc:
+        raise FacePlusPlusError("Face++ returned invalid JSON.") from exc
+
+    if body.get("error_message"):
+        raise FacePlusPlusError(f"Face++ error: {body['error_message']}")
+    faces = body.get("faces") or []
+    if not faces:
+        raise FacePlusPlusError("Face++ detected no face.")
+    if len(faces) > compare_face:
+        raise FacePlusPlusError(
+            f"Face++ detected {len(faces)} faces; maximum allowed is {compare_face}."
+        )
+
+    parsed: list[tuple[float, int, dict, dict, dict]] = []
+    for face in faces[:5]:
+        raw_landmarks = face.get("landmark") or {}
+        landmarks = {
+            name: (float(value["x"]), float(value["y"]))
+            for name, value in raw_landmarks.items()
+            if isinstance(value, Mapping) and "x" in value and "y" in value
+        }
+        attributes = Get_Flattened_Dict(face.get("attributes") or {})
+        left_eye, right_eye = get_eye_centers(landmarks)
+        eye_distance = Get_Euclidean_Distance(left_eye, right_eye)
+        score = _quality_score(landmarks, attributes)
+        parsed.append((eye_distance, score, landmarks, attributes, face.get("face_rectangle") or {}))
+
+    _, score, landmarks, attributes, rectangle = max(parsed, key=lambda item: item[0])
+    return score, landmarks, attributes, rectangle
+
+
+def get_rectangle(rectangle: Mapping[str, Any]) -> list[list[tuple[int, int]]]:
+    """Convert a Face++ rectangle to top and bottom corner pairs."""
+    left = int(rectangle["left"])
+    top = int(rectangle["top"])
+    width = int(rectangle["width"])
+    height = int(rectangle["height"])
+    return [
+        [(left, top), (left + width, top)],
+        [(left, top + height), (left + width, top + height)],
+    ]
+
+
+def get_faceplusplus_outputs(
+    img: np.ndarray,
+    credentials: tuple[str, str],
+    verify_score: int = 0,
+    max_faces: int = 1,
+    timeout: float = 15.0,
+) -> dict[str, Any]:
+    """Call Face++ once with the configured Study 2 credential pair."""
+    key, secret = credentials
+    score, landmarks, attributes, rectangle = Get_FacePlusPlus_Outputs(
+        img,
+        key,
+        secret,
+        landmark_106=2,
+        compare_face=max_faces,
+        timeout=timeout,
+    )
+    if score < verify_score:
+        raise FacePlusPlusError(
+            f"face usability score {score}/5 is below required {verify_score}/5"
+        )
+    return {
+        "score": score,
+        "landmarks": landmarks,
+        "attributes": attributes,
+        "rectangle": dict(rectangle),
+        "credential": "FPP",
+    }
+
+
+def get_rotated_image(
+    img: np.ndarray,
+    src_lt: tuple[float, float],
+    src_rt: tuple[float, float],
+    dst_lt: tuple[float, float] = (33, 33),
+    dst_rt: tuple[float, float] = (191, 33),
+    imsize: int = 224,
+) -> np.ndarray:
+    """Align, scale, and place a face using its two eye centers."""
+    in_points = [tuple(src_lt), tuple(src_rt)]
+    out_points = [tuple(dst_lt), tuple(dst_rt)]
+    sin60 = math.sin(math.radians(60))
+    cos60 = math.cos(math.radians(60))
+
+    def third_point(points: list[tuple[float, float]]) -> tuple[float, float]:
+        x = cos60 * (points[0][0] - points[1][0]) - sin60 * (
+            points[0][1] - points[1][1]
+        ) + points[1][0]
+        y = sin60 * (points[0][0] - points[1][0]) + cos60 * (
+            points[0][1] - points[1][1]
+        ) + points[1][1]
+        return x, y
+
+    in_points.append(third_point(in_points))
+    out_points.append(third_point(out_points))
+    transform = cv2.getAffineTransform(
+        np.asarray(in_points, dtype=np.float32),
+        np.asarray(out_points, dtype=np.float32),
+    )
+    return cv2.warpAffine(
+        img,
+        transform,
+        (imsize, imsize),
+        flags=cv2.INTER_LINEAR,
+        borderMode=cv2.BORDER_CONSTANT,
+        borderValue=0,
+    )
+
+
+def to_grayscale(img: np.ndarray, bgr: bool = True, vgg: bool = True) -> np.ndarray:
+    """Convert an image to normalized float32 grayscale in the range [0, 1].
+
+    The original function clipped uint8 input directly to [0, 1], which made
+    most pixels white.  This version first normalizes 0..255 input.  With
+    ``vgg=True`` the grayscale plane is repeated into three channels; with
+    ``vgg=False`` a single 2-D plane is returned.
+    """
+    array = np.asarray(img)
+    if array.ndim != 3 or array.shape[2] < 3:
+        raise ValueError("Expected an H x W x 3 color image.")
+    work = array[..., :3].astype(np.float32)
+    if work.max(initial=0) > 1.0:
+        work /= 255.0
+    weights = np.asarray(
+        [0.1140, 0.5870, 0.2989] if bgr else [0.2989, 0.5870, 0.1140],
+        dtype=np.float32,
+    )
+    gray = np.clip(np.dot(work, weights), 0.0, 1.0).astype(np.float32)
+    return np.repeat(gray[..., None], 3, axis=2) if vgg else gray

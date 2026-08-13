@@ -1,0 +1,7 @@
+numpy>=1.24
+opencv-python-headless>=4.8
+pillow>=10.0
+pillow-avif-plugin>=1.5
+python-dotenv>=1.0
+requests>=2.31
+mediapipe>=0.10.14,<2

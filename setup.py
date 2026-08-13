@@ -1,46 +1,35 @@
-import io, os
+import io
+import os
+
 from setuptools import setup
 
 
 def readme():
     base_dir = os.path.abspath(os.path.dirname(__file__))
-    with io.open(os.path.join(base_dir, 'README.md'), 'r', encoding='utf-8') as f:
-        return f.read()
+    with io.open(os.path.join(base_dir, "README.md"), "r", encoding="utf-8") as handle:
+        return handle.read()
 
-
-install_requirements = [
-    "requests",
-    "scipy",
-    "numpy",
-    "pandas",
-    "opencv-python-headless",
-    "scikit-learn",
-    "matplotlib",
-    "python-dotenv",
-    "statsmodels",
-]
 
 setup(
-    name='face_utils',
-    version='0.3.0',
-    description='Facial-feature extraction, image preprocessing, and statistics utilities for facial-image research.',
+    name="face_utils",
+    version="1.0.0+study2",
+    description="Portrait segmentation, Face++ alignment, and grayscale preprocessing for Study 2.",
     long_description=readme(),
     long_description_content_type="text/markdown",
-    url='https://github.com/dtzx00/Facial_Features',
-    author='Dawei Wang',
-    author_email='david.wang@kellogg.northwestern.edu',
-    license='BSD 2-clause',
-    packages=['face_utils'],
-    classifiers=[
-        'Development Status :: 3 - Alpha',
-        'Intended Audience :: Science/Research',
-        'License :: OSI Approved :: BSD License',
-        'Operating System :: POSIX :: Linux',
-        'Programming Language :: Python :: 3',
+    license="BSD-2-Clause",
+    packages=["face_utils"],
+    python_requires=">=3.10",
+    install_requires=[
+        "requests>=2.31",
+        "numpy>=1.24",
+        "opencv-python-headless>=4.8",
+        "pillow>=10.0",
+        "pillow-avif-plugin>=1.5",
+        "python-dotenv>=1.0",
+        "mediapipe>=0.10.14,<2",
     ],
-    install_requires=install_requirements,
-    extras_require={
-        # Deep-learning extras: only needed for load_custom_vgg / VGGFace features.
-        "deep": ["tensorflow>=2.0"],
-    },
+    classifiers=[
+        "Intended Audience :: Science/Research",
+        "Programming Language :: Python :: 3",
+    ],
 )

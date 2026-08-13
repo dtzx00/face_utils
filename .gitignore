@@ -11,9 +11,9 @@ dist/
 .venv/
 venv/
 
-# Models (large binaries)
-*.h5
-models/
+# Study 2 generated outputs
+study2_preprocessed_output/
+pilot_output/
 
 # OS / editor
 .DS_Store
